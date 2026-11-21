@@ -154,7 +154,7 @@ class HomeScreen : public UIScreen {
   int recent_next_idx;
   AdvertPath recent[UI_RECENT_LIST_SIZE];
 #if UI_DISCOVER_SCREEN
-  DiscoveredNode discovered[DISCOVERED_NODES_TABLE_SIZE]; // not circular, latest discovered nodes are not kept
+  DiscoveredNode discovered[DISCOVERED_NODES_TABLE_SIZE]; // strongest two-way link first
   uint32_t disc_node_req_tag = 0;
   uint32_t disc_nodes_count = 0;
   uint32_t discovery_req_time = 0;
@@ -274,19 +274,34 @@ public:
   }
 
   void handleDiscoverResponse(const mesh::Packet* packet) {
-    if (disc_nodes_count < DISCOVERED_NODES_TABLE_SIZE && memcmp(&packet->payload[2], &disc_node_req_tag, 4) == 0) {
-      auto d = &discovered[disc_nodes_count++];
-      memcpy(d->pubkey_prefix, &packet->payload[6], 8);
-      d->type = packet->payload[0] & 0xF;
-      d->snr_out = ((int8_t)packet->payload[1]) / 4.0;
-      d->snr_in = radio_driver.getLastSNR();
-      ContactInfo* c = _task->getMesh()->lookupContactByPubKey(&packet->payload[6], 8);
-      if (c != NULL) {
-        strncpy(d->name, c->name, 32);
-      } else {
-        d->name[0] = 0;
-      }
+    if (memcmp(&packet->payload[2], &disc_node_req_tag, 4) != 0) return;
+
+    DiscoveredNode node{};
+    memcpy(node.pubkey_prefix, &packet->payload[6], 8);
+    node.type = packet->payload[0] & 0xF;
+    node.snr_out = static_cast<int8_t>(packet->payload[1]) / 4.0f;
+    node.snr_in = packet->getSNR();
+    const float snr = node.linkSNR();
+
+    for (uint32_t i = 0; i < disc_nodes_count; ++i) {
+      if (memcmp(discovered[i].pubkey_prefix, node.pubkey_prefix, 8) != 0) continue;
+      if (discovered[i].linkSNR() >= snr) return;
+      --disc_nodes_count;
+      for (uint32_t j = i; j < disc_nodes_count; ++j) discovered[j] = discovered[j + 1];
+      break;
     }
+
+    uint32_t pos = 0;
+    while (pos < disc_nodes_count && discovered[pos].linkSNR() >= snr) ++pos;
+    if (pos == DISCOVERED_NODES_TABLE_SIZE) return;
+
+    if (disc_nodes_count < DISCOVERED_NODES_TABLE_SIZE) ++disc_nodes_count;
+    for (uint32_t i = disc_nodes_count - 1; i > pos; --i) discovered[i] = discovered[i - 1];
+    ContactInfo* contact = _task->getMesh()->lookupContactByPubKey(node.pubkey_prefix, 8);
+    if (contact) {
+      strncpy(node.name, contact->name, sizeof(node.name) - 1);
+    }
+    discovered[pos] = node;
   }
 #endif
 

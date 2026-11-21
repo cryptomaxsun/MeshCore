@@ -44,6 +44,8 @@ struct DiscoveredNode {
   uint8_t pubkey_prefix[9];
   uint8_t type;
   char name[32];
+
+  float linkSNR() const { return snr_in < snr_out ? snr_in : snr_out; }
 };
 #endif
 
