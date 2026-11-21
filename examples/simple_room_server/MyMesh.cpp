@@ -39,6 +39,115 @@ struct ServerStats {
   uint16_t n_posted, n_post_push;
 };
 
+namespace {
+  const char* const POST_LOG_PATHS[] = {"/room_posts_a", "/room_posts_b"};
+  constexpr uint8_t POST_RECORD_VERSION = 1;
+  constexpr size_t POST_TIMESTAMP_OFFSET = 1;
+  constexpr size_t POST_AUTHOR_OFFSET = POST_TIMESTAMP_OFFSET + sizeof(uint32_t);
+  constexpr size_t POST_TEXT_OFFSET = POST_AUTHOR_OFFSET + PUB_KEY_SIZE;
+  constexpr size_t POST_CHECKSUM_OFFSET = POST_TEXT_OFFSET + MAX_POST_TEXT_LEN + 1;
+  constexpr size_t POST_CHECKSUM_SIZE = 4;
+  constexpr size_t POST_RECORD_SIZE = POST_CHECKSUM_OFFSET + POST_CHECKSUM_SIZE;
+  constexpr size_t POST_LOG_LIMIT = POST_RECORD_SIZE * MAX_UNSYNCED_POSTS;
+
+  void checksumPost(uint8_t* checksum, const uint8_t* record) {
+    mesh::Utils::sha256(checksum, POST_CHECKSUM_SIZE, record, POST_CHECKSUM_OFFSET);
+  }
+
+  bool decodePost(const uint8_t* record, PostInfo& post) {
+    if (record[0] != POST_RECORD_VERSION || record[POST_CHECKSUM_OFFSET - 1] != 0) return false;
+    uint8_t checksum[POST_CHECKSUM_SIZE];
+    checksumPost(checksum, record);
+    if (memcmp(checksum, record + POST_CHECKSUM_OFFSET, sizeof(checksum)) != 0) return false;
+
+    memcpy(&post.post_timestamp, record + POST_TIMESTAMP_OFFSET, sizeof(post.post_timestamp));
+    if (post.post_timestamp == 0 || post.post_timestamp == UINT32_MAX) return false;
+    post.author = mesh::Identity(record + POST_AUTHOR_OFFSET);
+    memcpy(post.text, record + POST_TEXT_OFFSET, sizeof(post.text));
+    return true;
+  }
+
+  File openPostLog(FILESYSTEM* fs, const char* path) {
+#if defined(RP2040_PLATFORM)
+    return fs->open(path, "r");
+#else
+    return fs->open(path);
+#endif
+  }
+}
+
+void MyMesh::loadPosts() {
+  uint32_t latest[2] = {};
+  PostInfo post;
+  uint8_t record[POST_RECORD_SIZE];
+  for (uint8_t i = 0; i < 2; ++i) {
+    File file = openPostLog(_fs, POST_LOG_PATHS[i]);
+    if (!file) continue;
+    while (file.read(record, sizeof(record)) == sizeof(record)) {
+      if (decodePost(record, post)) latest[i] = std::max(latest[i], post.post_timestamp);
+    }
+    file.close();
+  }
+
+  post_log_index = latest[1] > latest[0] ? 1 : 0;
+  if (latest[post_log_index] == 0) return;
+
+  // Replay the older segment first. The RAM ring retains only the newest posts.
+  uint32_t last_loaded = 0;
+  for (uint8_t i = 0; i < 2; ++i) {
+    const uint8_t index = i == 0 ? 1 - post_log_index : post_log_index;
+    File file = openPostLog(_fs, POST_LOG_PATHS[index]);
+    if (!file) continue;
+    while (file.read(record, sizeof(record)) == sizeof(record)) {
+      if (!decodePost(record, post) || post.post_timestamp <= last_loaded) continue;
+      last_loaded = post.post_timestamp;
+      posts[next_post_idx] = post;
+      next_post_idx = (next_post_idx + 1) % MAX_UNSYNCED_POSTS;
+    }
+    file.close();
+  }
+
+  if (getRTCClock()->getCurrentTime() <= last_loaded) {
+    getRTCClock()->setCurrentTime(last_loaded + 1);
+  }
+}
+
+bool MyMesh::appendPost(const PostInfo& post) {
+  uint8_t index = post_log_index;
+  size_t size = 0;
+  if (File previous = openPostLog(_fs, POST_LOG_PATHS[index])) {
+    size = previous.size();
+    previous.close();
+  }
+  // Rotate once there is no room for a complete new record after any partial tail.
+  if (size > POST_LOG_LIMIT - POST_RECORD_SIZE) {
+    index = 1 - index;
+    const char* path = POST_LOG_PATHS[index];
+    if (_fs->exists(path) && !_fs->remove(path)) return false;
+    size = 0;
+  }
+  File file = openAppend(POST_LOG_PATHS[index]);
+  if (!file) return false;
+
+  uint8_t record[POST_RECORD_SIZE] = {};
+  const size_t tail = size % POST_RECORD_SIZE;
+  // Pad an interrupted record so later records can be recovered independently.
+  if (tail != 0 && file.write(record, POST_RECORD_SIZE - tail) != POST_RECORD_SIZE - tail) {
+    file.close();
+    return false;
+  }
+
+  record[0] = POST_RECORD_VERSION;
+  memcpy(record + POST_TIMESTAMP_OFFSET, &post.post_timestamp, sizeof(post.post_timestamp));
+  memcpy(record + POST_AUTHOR_OFFSET, post.author.pub_key, PUB_KEY_SIZE);
+  memcpy(record + POST_TEXT_OFFSET, post.text, strlen(post.text) + 1);
+  checksumPost(record + POST_CHECKSUM_OFFSET, record);
+  const bool written = file.write(record, sizeof(record)) == sizeof(record);
+  file.close();
+  if (written) post_log_index = index;
+  return written;
+}
+
 void MyMesh::addPost(ClientInfo *client, const char *postData) {
   storePost(client->id, postData);
 }
@@ -58,6 +167,9 @@ void MyMesh::storePost(const mesh::Identity &author, const char *postData) {
   StrHelper::strncpy(posts[idx].text, postData, MAX_POST_TEXT_LEN);
 
   posts[idx].post_timestamp = getRTCClock()->getCurrentTimeUnique();
+  if (!appendPost(posts[idx])) {
+    MESH_DEBUG_PRINTLN("room.post: unable to persist post");
+  }
   MESH_DEBUG_PRINTLN("room.post: storePost idx=%d text=%s", idx, posts[idx].text);
   MESH_DEBUG_PRINTLN("room.post: timestamp=%u", posts[idx].post_timestamp);
   next_post_idx = (next_post_idx + 1) % MAX_UNSYNCED_POSTS;
@@ -703,6 +815,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   acl.load(_fs, self_id);
   region_map.load(_fs);
+  loadPosts();
 
   // establish default-scope
   {

@@ -106,6 +106,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   int next_client_idx;  // for round-robin polling
   int next_post_idx;
   PostInfo posts[MAX_UNSYNCED_POSTS];   // cyclic queue
+  uint8_t post_log_index = 0;
   CayenneLPP telemetry;
   RegionEntry* load_stack[8];
   RegionEntry* recv_pkt_region;
@@ -119,6 +120,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   void addPost(ClientInfo* client, const char* postData);
   void storePost(const mesh::Identity& author, const char* postData);
+  void loadPosts();
+  bool appendPost(const PostInfo& post);
   void pushPostToClient(ClientInfo* client, PostInfo& post);
   uint8_t getUnsyncedCount(ClientInfo* client);
   bool processAck(const uint8_t *data);
