@@ -216,6 +216,25 @@ class HomeScreen : public UIScreen {
     display.setCursor(leftX, 2);
     display.print(pct);
 
+    // show BLE connection icon when host is connected
+    if (_task->hasConnection()) {
+      leftX -= 9;
+      display.setColor(UIColor::title_txt);
+      display.drawXbm(leftX, iconY + 1, ble_conn_icon, 8, 8);
+    }
+
+#if ENV_INCLUDE_GPS == 1
+    // show GPS fix icon when GPS is enabled and has a valid fix
+    if (_task->getGPSState()) {
+      LocationProvider* nmea = sensors.getLocationProvider();
+      if (nmea != NULL && nmea->getLastFixAge() != UINT32_MAX) {
+        leftX -= 9;
+        display.setColor(UIColor::title_txt);
+        display.drawXbm(leftX, iconY + 1, gps_fix_icon, 8, 8);
+      }
+    }
+#endif
+
     // show muted icon if buzzer is muted
 #ifdef PIN_BUZZER
     if (_task->isBuzzerQuiet()) {
@@ -235,6 +254,19 @@ class HomeScreen : public UIScreen {
 #endif
 
     return leftX;
+  }
+
+  void formatRfSummary(char* buf, size_t size) {
+    int heard = 0;
+    for (int i = 0; i < UI_RECENT_LIST_SIZE; i++) {
+      if (recent[i].name[0] != 0) heard++;
+    }
+    float last_snr = radio_driver.getLastSNR();
+    if (heard > 0 || last_snr != 0.0f) {
+      snprintf(buf, size, "Nodes:%d SNR:%.1f", heard, last_snr);
+    } else {
+      snprintf(buf, size, "Nodes:0 NF:%d", radio_driver.getNoiseFloor());
+    }
   }
 
   CayenneLPP sensors_lpp;
@@ -397,14 +429,15 @@ public:
         display.drawTextCentered(display.width() / 2, 30, time_str);
         #endif
 
-        if (_task->hasConnection()) {
-          display.setColor(UIColor::warning_txt);
-          display.setTextSize(1);
-          display.drawTextCentered(display.width() / 2, 51, "< Connected >");
-        } else if (_task->getBLEPin() != 0) { // BT pin
+        if (!_task->hasConnection() && _task->getBLEPin() != 0) { // BT pin
           display.setColor(UIColor::warning_txt);
           display.setTextSize(1);
           snprintf(tmp, sizeof(tmp), "Pin:%lu", (unsigned long)_task->getBLEPin());
+          display.drawTextCentered(display.width() / 2, 51, tmp);
+        } else {
+          formatRfSummary(tmp, sizeof(tmp));
+          display.setColor(UIColor::secondary_txt);
+          display.setTextSize(1);
           display.drawTextCentered(display.width() / 2, 51, tmp);
         }
       } else {
@@ -432,22 +465,40 @@ public:
           display.setTextSize(1);
           display.drawTextCentered(display.width() / 2, 32, tmp);
         #endif
-        if (_task->hasConnection()) {
-          display.setColor(UIColor::warning_txt);
+        if (display.height() >= 120) {
+          formatRfSummary(tmp, sizeof(tmp));
+          display.setColor(UIColor::secondary_txt);
           display.setTextSize(1);
-          if (_node_prefs->ui_show_clock)
-            display.drawTextCentered(display.width() / 2, 110, "< Connected >");
-          else
-            display.drawTextCentered(display.width() / 2, 43, "< Connected >");
-        } else if (_task->getBLEPin() != 0) { // BT pin
-          display.setColor(UIColor::warning_txt);
-          sprintf(tmp, "Pin:%lu", (unsigned long)_task->getBLEPin());
-          if (_node_prefs->ui_show_clock) {
+          display.drawTextCentered(display.width() / 2, 95, tmp);
+          if (_task->hasConnection()) {
+            display.setColor(UIColor::warning_txt);
             display.setTextSize(1);
-            display.drawTextCentered(display.width() / 2, 110, tmp);
-          } else {
+            if (_node_prefs->ui_show_clock)
+              display.drawTextCentered(display.width() / 2, 110, "< Connected >");
+            else
+              display.drawTextCentered(display.width() / 2, 43, "< Connected >");
+          } else if (_task->getBLEPin() != 0) { // BT pin
+            display.setColor(UIColor::warning_txt);
+            sprintf(tmp, "Pin:%lu", (unsigned long)_task->getBLEPin());
+            if (_node_prefs->ui_show_clock) {
+              display.setTextSize(1);
+              display.drawTextCentered(display.width() / 2, 110, tmp);
+            } else {
+              display.setTextSize(2);
+              display.drawTextCentered(display.width() / 2, 43, tmp);
+            }
+          }
+        } else {
+          if (!_task->hasConnection() && _task->getBLEPin() != 0) { // BT pin
+            display.setColor(UIColor::warning_txt);
+            sprintf(tmp, "Pin:%lu", (unsigned long)_task->getBLEPin());
             display.setTextSize(2);
             display.drawTextCentered(display.width() / 2, 43, tmp);
+          } else {
+            formatRfSummary(tmp, sizeof(tmp));
+            display.setColor(UIColor::secondary_txt);
+            display.setTextSize(1);
+            display.drawTextCentered(display.width() / 2, 51, tmp);
           }
         }
       }
